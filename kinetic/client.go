@@ -65,6 +65,7 @@ func (e RemoteError) Error() string {
 type Client interface {
 	Put (key []byte, value []byte) ((<-chan error), error)
 	PutFrom (key []byte, length int, queue <-chan []byte) ((<-chan error), error)
+	Delete (key []byte) ((<-chan error), error)
 	
 	Close()
 }
@@ -224,6 +225,48 @@ func(self *NetworkClient) PutFrom(key []byte, length int, queue <-chan []byte) (
 		}
 	
 	err = network.SendFrom(self.conn, msg, length, queue)	
+	if err != nil { return nil, err }
+			
+	rx := make(chan error, 1)		
+	pending := PendingOperation { sequence: self.sequence, receiver: rx }		
+			
+	self.notifier <- pending			
+			
+	self.sequence += 1
+	
+	return rx, nil
+}
+
+func(self *NetworkClient) Delete(key []byte) ((<-chan error), error) {	
+	cmd := &kproto.Command {
+			Header: &kproto.Command_Header {
+				ConnectionID: proto.Int64(self.connectionId),
+				Sequence: proto.Int64(self.sequence),
+				MessageType: kproto.Command_DELETE.Enum(),
+			},
+			Body: &kproto.Command_Body {
+				KeyValue: &kproto.Command_KeyValue {
+					Key: key,
+					Algorithm: kproto.Command_SHA1.Enum(),
+					Tag: make([]byte, 0),
+					Synchronization: kproto.Command_WRITEBACK.Enum(),
+				},
+			},
+		}
+
+	cmd_bytes, err := proto.Marshal(cmd)		
+	if err != nil { return nil, err }
+	
+	msg := &kproto.Message {
+			AuthType: kproto.Message_HMACAUTH.Enum(),
+			HmacAuth: &kproto.Message_HMACauth {
+				Identity: proto.Int64(self.userId),
+				Hmac: calculate_hmac(self.secret, cmd_bytes),
+			},
+			CommandBytes: cmd_bytes,
+		}
+	
+	err = network.Send(self.conn, msg, nil)	
 	if err != nil { return nil, err }
 			
 	rx := make(chan error, 1)		
